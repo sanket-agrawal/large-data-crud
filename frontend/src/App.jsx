@@ -2,12 +2,19 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Search, UploadCloud, Database, Layers, Filter, RefreshCw, Plus, Edit2, Trash2,
   Download, FileSpreadsheet, CheckCircle, AlertCircle, X, ChevronLeft, ChevronRight,
-  BarChart2, MapPin, Hash, Phone, User, Calendar, ShieldCheck, Tag, Globe
+  BarChart2, MapPin, Hash, Phone, User, Calendar, ShieldCheck, Tag, Globe, Lock, LogOut
 } from 'lucide-react';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('search'); // 'search', 'import', 'stats'
   
+  // Authentication State
+  const [token, setToken] = useState(localStorage.getItem('token') || null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+
   // Data & Stats State
   const [records, setRecords] = useState([]);
   const [stats, setStats] = useState(null);
@@ -47,18 +54,45 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  const authenticatedFetch = useCallback(async (url, options = {}) => {
+    const headers = {
+      ...options.headers,
+    };
+    
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    
+    try {
+      const res = await fetch(url, { ...options, headers });
+      if (res.status === 401) {
+        setToken(null);
+        localStorage.removeItem('token');
+        showToast('Session expired, please login again.', 'error');
+        throw new Error('Unauthorized');
+      }
+      return res;
+    } catch (err) {
+      if (err.message === 'Unauthorized') {
+        throw err;
+      }
+      console.error('Fetch error:', err);
+      throw err;
+    }
+  }, [token]);
+
   // Fetch Statistics
   const fetchStats = useCallback(async () => {
     try {
-      const res = await fetch('/api/stats');
-      if (res.ok) {
+      const res = await authenticatedFetch('/api/stats');
+      if (res && res.ok) {
         const data = await res.json();
         setStats(data);
       }
     } catch (err) {
       console.error('Failed to fetch stats:', err);
     }
-  }, []);
+  }, [authenticatedFetch]);
 
   // Fetch Records with debounce/query params
   const fetchRecords = useCallback(async () => {
@@ -77,8 +111,8 @@ export default function App() {
       if (filterRto.trim()) params.append('rto', filterRto.trim());
       if (filterSheet.trim()) params.append('source_sheet', filterSheet.trim());
 
-      const res = await fetch(`/api/search?${params.toString()}`);
-      if (res.ok) {
+      const res = await authenticatedFetch(`/api/search?${params.toString()}`);
+      if (res && res.ok) {
         const data = await res.json();
         setRecords(data.data);
         setTotalRecords(data.total);
@@ -91,12 +125,50 @@ export default function App() {
       setLoading(false);
       setInitialLoading(false);
     }
-  }, [query, filterMake, filterPincode, filterRto, filterSheet, page, limit, sortBy, sortOrder]);
+  }, [query, filterMake, filterPincode, filterRto, filterSheet, page, limit, sortBy, sortOrder, authenticatedFetch]);
 
   useEffect(() => {
-    fetchStats();
-    fetchRecords();
-  }, [fetchStats, fetchRecords]);
+    if (token) {
+      fetchStats();
+      fetchRecords();
+    }
+  }, [token, fetchStats, fetchRecords]);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setAuthLoading(true);
+    setAuthError('');
+    try {
+      const res = await fetch('/api/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        localStorage.setItem('token', data.token);
+        setToken(data.token);
+        showToast('Logged in successfully!');
+      } else {
+        const errData = await res.json();
+        setAuthError(errData.detail || 'Invalid email or password');
+      }
+    } catch (err) {
+      setAuthError('Connection error. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('token');
+    setToken(null);
+    setEmail('');
+    setPassword('');
+    setAuthError('');
+    showToast('Logged out');
+  };
 
   // Handle File Upload with Real-Time Percentage Progress
   const handleFileUpload = async (filesToUpload) => {
@@ -114,12 +186,12 @@ export default function App() {
     }
 
     try {
-      const response = await fetch('/api/import', {
+      const response = await authenticatedFetch('/api/import', {
         method: 'POST',
         body: data
       });
 
-      if (!response.ok) {
+      if (!response || !response.ok) {
         showToast('Failed to start import service', 'error');
         setUploading(false);
         setUploadStatus('error');
@@ -173,13 +245,13 @@ export default function App() {
       const url = editingRecord ? `/api/records/${editingRecord.id}` : '/api/records';
       const method = editingRecord ? 'PUT' : 'POST';
 
-      const res = await fetch(url, {
+      const res = await authenticatedFetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
 
-      if (res.ok) {
+      if (res && res.ok) {
         showToast(editingRecord ? 'Record updated successfully!' : 'New record created!');
         setShowAddModal(false);
         setEditingRecord(null);
@@ -195,8 +267,8 @@ export default function App() {
   const handleDelete = async (id) => {
     if (!window.confirm('Are you sure you want to delete this record?')) return;
     try {
-      const res = await fetch(`/api/records/${id}`, { method: 'DELETE' });
-      if (res.ok) {
+      const res = await authenticatedFetch(`/api/records/${id}`, { method: 'DELETE' });
+      if (res && res.ok) {
         showToast('Record deleted');
         fetchStats();
         fetchRecords();
@@ -210,8 +282,8 @@ export default function App() {
   const handleClearAll = async () => {
     if (!window.confirm('Are you sure you want to delete ALL data from the database? This cannot be undone.')) return;
     try {
-      const res = await fetch('/api/clear', { method: 'POST' });
-      if (res.ok) {
+      const res = await authenticatedFetch('/api/clear', { method: 'POST' });
+      if (res && res.ok) {
         showToast('Database cleared completely');
         fetchStats();
         fetchRecords();
@@ -229,6 +301,7 @@ export default function App() {
     if (filterPincode.trim()) params.append('pincode', filterPincode.trim());
     if (filterRto.trim()) params.append('rto', filterRto.trim());
     if (filterSheet.trim()) params.append('source_sheet', filterSheet.trim());
+    if (token) params.append('token', token); // Inject token for query auth in exports
 
     window.open(`/api/export?${params.toString()}`, '_blank');
   };
@@ -259,6 +332,71 @@ export default function App() {
     setShowAddModal(true);
   };
 
+  if (!token) {
+    return (
+      <div className="app-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '90vh' }}>
+        {toast && (
+          <div className={`toast ${toast.type === 'error' ? 'toast-error' : ''}`}>
+            {toast.type === 'error' ? <AlertCircle size={18} color="#dc2626" /> : <CheckCircle size={18} color="#059669" />}
+            <span>{toast.message}</span>
+          </div>
+        )}
+        <div className="login-card">
+          <div className="login-header">
+            <div className="brand-icon">
+              <Database size={24} />
+            </div>
+            <h2>Welcome Back</h2>
+            <p>Please enter your credentials to access the console</p>
+          </div>
+
+          <form onSubmit={handleLogin}>
+            {authError && (
+              <div className="auth-error-msg">
+                <AlertCircle size={18} />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            <div className="auth-form-group">
+              <label>Email Address</label>
+              <div className="auth-input-wrapper">
+                <User size={16} className="auth-input-icon" />
+                <input
+                  type="email"
+                  className="auth-input"
+                  placeholder="admin@example.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            <div className="auth-form-group">
+              <label>Password</label>
+              <div className="auth-input-wrapper">
+                <Lock size={16} className="auth-input-icon" />
+                <input
+                  type="password"
+                  className="auth-input"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+
+            <button type="submit" className="btn btn-primary login-btn" disabled={authLoading}>
+              {authLoading ? 'Signing in...' : 'Sign In'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app-container">
       {/* Toast Notification */}
@@ -281,7 +419,7 @@ export default function App() {
           </div>
         </div>
 
-        <div className="header-actions">
+        <div className="header-actions" style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
           <nav className="nav-tabs">
             <button
               className={`tab-btn ${activeTab === 'search' ? 'active' : ''}`}
@@ -302,6 +440,9 @@ export default function App() {
               <BarChart2 size={16} /> Analytics
             </button>
           </nav>
+          <button className="logout-btn" onClick={handleLogout}>
+            <LogOut size={16} /> Logout
+          </button>
         </div>
       </header>
 

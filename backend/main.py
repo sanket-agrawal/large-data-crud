@@ -1,8 +1,9 @@
 import os
 import shutil
 import tempfile
+import secrets
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,6 +24,22 @@ from database import (
 )
 
 from contextlib import asynccontextmanager
+
+# Keep active sessions in memory
+ACTIVE_TOKENS = set()
+
+def get_current_user(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)):
+    actual_token = None
+    if authorization:
+        parts = authorization.split(" ")
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            actual_token = parts[1]
+    elif token:
+        actual_token = token
+        
+    if not actual_token or actual_token not in ACTIVE_TOKENS:
+        raise HTTPException(status_code=401, detail="Unauthorized access")
+    return actual_token
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -60,12 +77,26 @@ class RecordSchema(BaseModel):
     source_file: Optional[str] = "Manual Entry"
     source_sheet: Optional[str] = "Manual"
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
 @app.get("/api/health")
 def health_check():
     return {"status": "ok", "message": "DuckDB Search API is running"}
 
+@app.post("/api/login")
+def login_endpoint(req: LoginRequest):
+    admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
+    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
+    if req.email == admin_email and req.password == admin_password:
+        token = secrets.token_hex(32)
+        ACTIVE_TOKENS.add(token)
+        return {"status": "success", "token": token}
+    raise HTTPException(status_code=401, detail="Invalid email or password")
+
 @app.get("/api/stats")
-def stats_endpoint():
+def stats_endpoint(current_user: str = Depends(get_current_user)):
     return get_dashboard_stats()
 
 @app.get("/api/search")
@@ -79,7 +110,8 @@ def search_endpoint(
     page: int = Query(1, ge=1, description="Page number"),
     limit: int = Query(50, ge=1, le=500, description="Records per page"),
     sort_by: str = Query("id", description="Column to sort by"),
-    sort_order: str = Query("ASC", description="Sort order: ASC or DESC")
+    sort_order: str = Query("ASC", description="Sort order: ASC or DESC"),
+    current_user: str = Depends(get_current_user)
 ):
     return search_records(
         query=query,
@@ -95,7 +127,10 @@ def search_endpoint(
     )
 
 @app.post("/api/import")
-async def import_excel_files(files: List[UploadFile] = File(...)):
+async def import_excel_files(
+    files: List[UploadFile] = File(...),
+    current_user: str = Depends(get_current_user)
+):
     """Upload one or multiple Excel files and stream progress percentages to frontend."""
     temp_dir = tempfile.mkdtemp()
     saved_files = []
@@ -118,19 +153,19 @@ async def import_excel_files(files: List[UploadFile] = File(...)):
     return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
 
 @app.post("/api/records")
-def create_record(record: RecordSchema):
+def create_record(record: RecordSchema, current_user: str = Depends(get_current_user)):
     return add_record(record.model_dump())
 
 @app.put("/api/records/{record_id}")
-def edit_record(record_id: int, record: RecordSchema):
+def edit_record(record_id: int, record: RecordSchema, current_user: str = Depends(get_current_user)):
     return update_record(record_id, record.model_dump())
 
 @app.delete("/api/records/{record_id}")
-def remove_record(record_id: int):
+def remove_record(record_id: int, current_user: str = Depends(get_current_user)):
     return delete_record(record_id)
 
 @app.post("/api/clear")
-def clear_db():
+def clear_db(current_user: str = Depends(get_current_user)):
     return clear_database()
 
 @app.get("/api/export")
@@ -141,7 +176,8 @@ def export_records(
     rto: Optional[str] = None,
     source_sheet: Optional[str] = None,
     source_file: Optional[str] = None,
-    format: str = Query("csv", pattern="^(csv|xlsx)$")
+    format: str = Query("csv", pattern="^(csv|xlsx)$"),
+    current_user: str = Depends(get_current_user)
 ):
     """Export matching search query results (up to 100,000 rows) as CSV or Excel."""
     res = search_records(
@@ -184,3 +220,4 @@ if os.path.exists(frontend_dist):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
