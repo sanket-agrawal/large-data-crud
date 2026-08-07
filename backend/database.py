@@ -6,7 +6,12 @@ import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 
+import threading
+
 DB_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "records.duckdb")
+
+_conn = None
+_conn_lock = threading.Lock()
 
 def ensure_tables(conn):
     """Ensure sequence, table, and indexes exist on the database connection."""
@@ -35,11 +40,15 @@ def ensure_tables(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_make ON records(make);")
 
 def get_db_connection():
-    """Create data directory if not exists, connect to DuckDB, and ensure schema exists."""
-    os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
-    conn = duckdb.connect(DB_FILE)
-    ensure_tables(conn)
-    return conn
+    """Get a thread-safe cursor to the persistent DuckDB connection."""
+    global _conn
+    if _conn is None:
+        with _conn_lock:
+            if _conn is None:
+                os.makedirs(os.path.dirname(DB_FILE), exist_ok=True)
+                _conn = duckdb.connect(DB_FILE)
+                ensure_tables(_conn)
+    return _conn.cursor()
 
 def init_db():
     """Initialize database table schema, sequence, and indexes."""

@@ -23,7 +23,16 @@ export default function App() {
   
   // Search & Filter State
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
   const [filterMake, setFilterMake] = useState('');
+
+  // Debounce search query input to avoid flooding backend with database scans
+  useEffect(() => {
+    const handler = setTimeout(() => {
+      setDebouncedQuery(query);
+    }, 300);
+    return () => clearTimeout(handler);
+  }, [query]);
   const [filterPincode, setFilterPincode] = useState('');
   const [filterRto, setFilterRto] = useState('');
   const [filterSheet, setFilterSheet] = useState('');
@@ -105,7 +114,7 @@ export default function App() {
         sort_order: sortOrder
       });
 
-      if (query.trim()) params.append('query', query.trim());
+      if (debouncedQuery.trim()) params.append('query', debouncedQuery.trim());
       if (filterMake.trim()) params.append('make', filterMake.trim());
       if (filterPincode.trim()) params.append('pincode', filterPincode.trim());
       if (filterRto.trim()) params.append('rto', filterRto.trim());
@@ -125,7 +134,7 @@ export default function App() {
       setLoading(false);
       setInitialLoading(false);
     }
-  }, [query, filterMake, filterPincode, filterRto, filterSheet, page, limit, sortBy, sortOrder, authenticatedFetch]);
+  }, [debouncedQuery, filterMake, filterPincode, filterRto, filterSheet, page, limit, sortBy, sortOrder, authenticatedFetch]);
 
   useEffect(() => {
     if (token) {
