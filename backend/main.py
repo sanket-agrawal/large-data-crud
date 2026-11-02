@@ -1,19 +1,17 @@
 import os
 import shutil
 import tempfile
-import secrets
 from typing import Optional, List, Dict, Any
-from fastapi import FastAPI, UploadFile, File, Query, HTTPException, BackgroundTasks, Depends, Header
+from fastapi import FastAPI, UploadFile, File, Query, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 import pandas as pd
 import io
 
 from database import (
     init_db,
-    ingest_excel_file,
     ingest_files_generator,
     search_records,
     get_dashboard_stats,
@@ -23,38 +21,63 @@ from database import (
     clear_database
 )
 
+from auth import (
+    init_auth_db,
+    authenticate_user,
+    create_session,
+    get_user_by_token,
+    invalidate_session,
+    create_user_account,
+    list_all_users,
+    set_user_active_status,
+    reset_user_one_time_password,
+    user_change_password,
+    delete_user_account
+)
+
 from contextlib import asynccontextmanager
 
-# Keep active sessions in memory
-ACTIVE_TOKENS = set()
-
-def get_current_user(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)):
-    actual_token = None
+def extract_token(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)) -> Optional[str]:
     if authorization:
         parts = authorization.split(" ")
         if len(parts) == 2 and parts[0].lower() == "bearer":
-            actual_token = parts[1]
-    elif token:
-        actual_token = token
-        
-    if not actual_token or actual_token not in ACTIVE_TOKENS:
-        raise HTTPException(status_code=401, detail="Unauthorized access")
-    return actual_token
+            return parts[1]
+    return token
+
+def get_current_user(authorization: Optional[str] = Header(None), token: Optional[str] = Query(None)) -> Dict[str, Any]:
+    tok = extract_token(authorization, token)
+    if not tok:
+        raise HTTPException(status_code=401, detail="Authentication token required.")
+    
+    user = get_user_by_token(tok)
+    if not user:
+        raise HTTPException(status_code=401, detail="Session expired or account revoked. Please log in again.")
+    
+    if not user["is_active"]:
+        raise HTTPException(status_code=403, detail="Account has been revoked by administrator.")
+    
+    user["token"] = tok
+    return user
+
+def get_current_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin privileges required for this action.")
+    return user
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize DuckDB tables on application startup."""
+    """Initialize DuckDB tables and SQLite Auth DB on application startup."""
+    init_auth_db()
     init_db()
     yield
 
 app = FastAPI(
-    title="Large Data CRUD & Search API",
-    description="DuckDB-powered instant search and management for 700k+ records",
-    version="1.0.0",
+    title="Universal Data Search & CRUD Engine",
+    description="DuckDB-powered instant search and management for 700k+ records with RBAC",
+    version="2.0.0",
     lifespan=lifespan
 )
 
-# Enable CORS for local development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -63,7 +86,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Pydantic schemas
+# Pydantic Schemas
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+class CreateUserRequest(BaseModel):
+    email: str
+    password: Optional[str] = None
+    role: Optional[str] = "user"
+
+class UpdateUserStatusRequest(BaseModel):
+    is_active: bool
+
+class ResetPasswordRequest(BaseModel):
+    new_password: Optional[str] = None
+
 class RecordSchema(BaseModel):
     reg_no: Optional[str] = ""
     rto: Optional[str] = ""
@@ -77,27 +119,108 @@ class RecordSchema(BaseModel):
     source_file: Optional[str] = "Manual Entry"
     source_sheet: Optional[str] = "Manual"
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+# --- Authentication Endpoints ---
 
 @app.get("/api/health")
 def health_check():
-    return {"status": "ok", "message": "DuckDB Search API is running"}
+    return {"status": "ok", "message": "Engine running smoothly"}
 
-@app.post("/api/login")
+@app.post("/api/auth/login")
 def login_endpoint(req: LoginRequest):
-    admin_email = os.getenv("ADMIN_EMAIL", "admin@example.com")
-    admin_password = os.getenv("ADMIN_PASSWORD", "admin123")
-    if req.email == admin_email and req.password == admin_password:
-        token = secrets.token_hex(32)
-        ACTIVE_TOKENS.add(token)
-        return {"status": "success", "token": token}
-    raise HTTPException(status_code=401, detail="Invalid email or password")
+    auth_res = authenticate_user(req.email, req.password)
+    if not auth_res:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    
+    if auth_res.get("error") == "revoked":
+        raise HTTPException(status_code=403, detail="Account access has been revoked. Contact administrator.")
+    
+    token = create_session(auth_res["id"])
+    return {
+        "status": "success",
+        "token": token,
+        "user": {
+            "id": auth_res["id"],
+            "email": auth_res["email"],
+            "role": auth_res["role"],
+            "must_change_password": auth_res["must_change_password"]
+        }
+    }
 
-@app.get("/api/stats")
-def stats_endpoint(current_user: str = Depends(get_current_user)):
-    return get_dashboard_stats()
+@app.get("/api/auth/me")
+def get_current_user_profile(user: Dict[str, Any] = Depends(get_current_user)):
+    return {
+        "id": user["id"],
+        "email": user["email"],
+        "role": user["role"],
+        "must_change_password": user["must_change_password"]
+    }
+
+@app.post("/api/auth/change-password")
+def change_password_endpoint(
+    req: ChangePasswordRequest, 
+    user: Dict[str, Any] = Depends(get_current_user)
+):
+    ok, msg = user_change_password(user["id"], req.old_password, req.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+@app.post("/api/auth/logout")
+def logout_endpoint(user: Dict[str, Any] = Depends(get_current_user)):
+    invalidate_session(user.get("token", ""))
+    return {"status": "success", "message": "Logged out successfully."}
+
+# --- Admin Portal User Management Endpoints ---
+
+@app.get("/api/admin/users")
+def get_users_list(admin: Dict[str, Any] = Depends(get_current_admin)):
+    return {"users": list_all_users()}
+
+@app.post("/api/admin/users")
+def add_new_user(req: CreateUserRequest, admin: Dict[str, Any] = Depends(get_current_admin)):
+    role = "admin" if req.role == "admin" else "user"
+    ok, msg, otp = create_user_account(req.email, req.password, role)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {
+        "status": "success",
+        "message": msg,
+        "one_time_password": otp,
+        "email": req.email.strip().lower()
+    }
+
+@app.patch("/api/admin/users/{user_id}/status")
+def update_user_status(user_id: int, req: UpdateUserStatusRequest, admin: Dict[str, Any] = Depends(get_current_admin)):
+    if user_id == admin["id"] and not req.is_active:
+        raise HTTPException(status_code=400, detail="You cannot revoke your own admin account.")
+    ok, msg = set_user_active_status(user_id, req.is_active)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+@app.post("/api/admin/users/{user_id}/reset-password")
+def reset_user_password_endpoint(
+    user_id: int, 
+    req: ResetPasswordRequest, 
+    admin: Dict[str, Any] = Depends(get_current_admin)
+):
+    ok, msg, otp = reset_user_one_time_password(user_id, req.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {
+        "status": "success",
+        "message": msg,
+        "one_time_password": otp
+    }
+
+@app.delete("/api/admin/users/{user_id}")
+def delete_user_endpoint(user_id: int, admin: Dict[str, Any] = Depends(get_current_admin)):
+    ok, msg = delete_user_account(user_id, admin["id"])
+    if not ok:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "success", "message": msg}
+
+# --- Search & Read Endpoints (Users & Admins) ---
 
 @app.get("/api/search")
 def search_endpoint(
@@ -111,8 +234,12 @@ def search_endpoint(
     limit: int = Query(50, ge=1, le=500, description="Records per page"),
     sort_by: str = Query("id", description="Column to sort by"),
     sort_order: str = Query("ASC", description="Sort order: ASC or DESC"),
-    current_user: str = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
+    # Enforce password change before accessing search data
+    if current_user.get("must_change_password"):
+        raise HTTPException(status_code=403, detail="You must change your one-time password before accessing search data.")
+
     return search_records(
         query=query,
         make=make,
@@ -126,17 +253,23 @@ def search_endpoint(
         sort_order=sort_order
     )
 
+@app.get("/api/stats")
+def stats_endpoint(current_user: Dict[str, Any] = Depends(get_current_user)):
+    return get_dashboard_stats()
+
+# --- Admin Ingestion & Record CRUD Endpoints (ADMIN ONLY) ---
+
 @app.post("/api/import")
 async def import_excel_files(
     files: List[UploadFile] = File(...),
-    current_user: str = Depends(get_current_user)
+    admin: Dict[str, Any] = Depends(get_current_admin)
 ):
-    """Upload one or multiple Excel files and stream progress percentages to frontend."""
+    """Upload Excel/CSV files and stream progress percentages to frontend (Admin Only)."""
     temp_dir = tempfile.mkdtemp()
     saved_files = []
 
     for file in files:
-        if not file.filename.endswith(('.xlsx', '.xls', '.csv')):
+        if not file.filename.lower().endswith(('.xlsx', '.xls', '.csv')):
             continue
         temp_path = os.path.join(temp_dir, file.filename)
         with open(temp_path, "wb") as buffer:
@@ -153,19 +286,19 @@ async def import_excel_files(
     return StreamingResponse(stream_wrapper(), media_type="text/event-stream")
 
 @app.post("/api/records")
-def create_record(record: RecordSchema, current_user: str = Depends(get_current_user)):
+def create_record(record: RecordSchema, admin: Dict[str, Any] = Depends(get_current_admin)):
     return add_record(record.model_dump())
 
 @app.put("/api/records/{record_id}")
-def edit_record(record_id: int, record: RecordSchema, current_user: str = Depends(get_current_user)):
+def edit_record(record_id: int, record: RecordSchema, admin: Dict[str, Any] = Depends(get_current_admin)):
     return update_record(record_id, record.model_dump())
 
 @app.delete("/api/records/{record_id}")
-def remove_record(record_id: int, current_user: str = Depends(get_current_user)):
+def remove_record(record_id: int, admin: Dict[str, Any] = Depends(get_current_admin)):
     return delete_record(record_id)
 
 @app.post("/api/clear")
-def clear_db(current_user: str = Depends(get_current_user)):
+def clear_db(admin: Dict[str, Any] = Depends(get_current_admin)):
     return clear_database()
 
 @app.get("/api/export")
@@ -177,7 +310,7 @@ def export_records(
     source_sheet: Optional[str] = None,
     source_file: Optional[str] = None,
     format: str = Query("csv", pattern="^(csv|xlsx)$"),
-    current_user: str = Depends(get_current_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Export matching search query results (up to 100,000 rows) as CSV or Excel."""
     res = search_records(
@@ -220,4 +353,3 @@ if os.path.exists(frontend_dist):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-

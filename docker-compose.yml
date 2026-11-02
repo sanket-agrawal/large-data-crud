@@ -10,4 +10,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/data
+    environment:
+      - ADMIN_EMAIL=admin@example.com
+      - ADMIN_PASSWORD=admin123
     restart: unless-stopped

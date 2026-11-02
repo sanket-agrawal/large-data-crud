@@ -5,7 +5,6 @@ import json
 import pandas as pd
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
-
 import threading
 
 DB_FILE = os.path.join(os.path.dirname(__file__), "..", "data", "records.duckdb")
@@ -14,7 +13,8 @@ _conn = None
 _conn_lock = threading.Lock()
 
 def ensure_tables(conn):
-    """Ensure sequence, table, and indexes exist on the database connection."""
+    """Ensure sequence, table, columns, and indexes exist on the database connection."""
+    conn.execute("PRAGMA threads=4;")
     conn.execute("CREATE SEQUENCE IF NOT EXISTS seq_records_id START 1;")
     conn.execute("""
         CREATE TABLE IF NOT EXISTS records (
@@ -30,9 +30,29 @@ def ensure_tables(conn):
             mobile VARCHAR,
             source_file VARCHAR,
             source_sheet VARCHAR,
+            search_text VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
     """)
+    
+    # Check if search_text column exists in case created with older version
+    try:
+        conn.execute("ALTER TABLE records ADD COLUMN IF NOT EXISTS search_text VARCHAR;")
+    except Exception:
+        pass
+
+    # Populate search_text for any rows where it is NULL
+    conn.execute("""
+        UPDATE records 
+        SET search_text = lower(concat_ws(' ', 
+            coalesce(reg_no, ''), coalesce(rto, ''), coalesce(reg_date, ''), 
+            coalesce(name, ''), coalesce(address, ''), coalesce(pincode, ''), 
+            coalesce(make, ''), coalesce(model_variant, ''), coalesce(mobile, ''), 
+            coalesce(source_sheet, '')
+        ))
+        WHERE search_text IS NULL;
+    """)
+
     conn.execute("CREATE INDEX IF NOT EXISTS idx_reg_no ON records(reg_no);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_name ON records(name);")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_mobile ON records(mobile);")
@@ -81,11 +101,37 @@ def normalize_column_name(col: str) -> str:
     else:
         return re.sub(r'\s+', '_', str(col).strip().lower())
 
+def prepare_df_for_insertion(df: pd.DataFrame, filename: str, sheet_name: str) -> pd.DataFrame:
+    standard_cols = [
+        "reg_no", "rto", "reg_date", "name", "address", 
+        "pincode", "make", "model_variant", "mobile"
+    ]
+    col_map = {orig: normalize_column_name(orig) for orig in df.columns}
+    df = df.rename(columns=col_map)
+    for col in standard_cols:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[standard_cols].fillna("").astype(str)
+    df["source_file"] = filename
+    df["source_sheet"] = str(sheet_name)
+    
+    # Compute consolidated lowercased search_text for sub-10ms global queries
+    df["search_text"] = (
+        df["reg_no"] + " " +
+        df["rto"] + " " +
+        df["reg_date"] + " " +
+        df["name"] + " " +
+        df["address"] + " " +
+        df["pincode"] + " " +
+        df["make"] + " " +
+        df["model_variant"] + " " +
+        df["mobile"] + " " +
+        df["source_sheet"]
+    ).str.lower()
+    return df
+
 def ingest_excel_file(file_path: str, filename: str) -> Dict[str, Any]:
-    """
-    Ingest all sheets from an Excel file into DuckDB.
-    Returns stats about ingested rows and sheets.
-    """
+    """Ingest all sheets from an Excel file into DuckDB."""
     excel_file = pd.ExcelFile(file_path)
     sheet_names = excel_file.sheet_names
     
@@ -93,38 +139,18 @@ def ingest_excel_file(file_path: str, filename: str) -> Dict[str, Any]:
     total_ingested = 0
     sheet_details = []
 
-    standard_cols = [
-        "reg_no", "rto", "reg_date", "name", "address", 
-        "pincode", "make", "model_variant", "mobile"
-    ]
-
     try:
         for sheet in sheet_names:
             df = pd.read_excel(excel_file, sheet_name=sheet, dtype=str)
             if df.empty:
                 continue
 
-            # Rename columns based on mapping
-            col_map = {orig: normalize_column_name(orig) for orig in df.columns}
-            df = df.rename(columns=col_map)
+            df = prepare_df_for_insertion(df, filename, sheet)
 
-            # Ensure all standard columns exist
-            for col in standard_cols:
-                if col not in df.columns:
-                    df[col] = ""
-
-            # Keep only standard columns & handle NaN/None
-            df = df[standard_cols].fillna("").astype(str)
-
-            # Add source metadata
-            df["source_file"] = filename
-            df["source_sheet"] = str(sheet)
-
-            # Bulk insert into DuckDB via Pandas DataFrame registration
             conn.register("temp_df", df)
             conn.execute("""
-                INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet)
-                SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet
+                INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text)
+                SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text
                 FROM temp_df;
             """)
             conn.unregister("temp_df")
@@ -154,7 +180,7 @@ def ingest_files_generator(file_items: List[Tuple[str, str]]):
 
     for temp_path, filename in file_items:
         try:
-            if filename.endswith('.csv'):
+            if filename.lower().endswith('.csv'):
                 file_sheet_maps.append((temp_path, filename, ['CSV_Data'], 'csv'))
                 total_sheets += 1
             else:
@@ -173,10 +199,6 @@ def ingest_files_generator(file_items: List[Tuple[str, str]]):
     results = []
 
     conn = get_db_connection()
-    standard_cols = [
-        "reg_no", "rto", "reg_date", "name", "address", 
-        "pincode", "make", "model_variant", "mobile"
-    ]
 
     try:
         for file_idx, (temp_path, filename, sheets, file_type) in enumerate(file_sheet_maps):
@@ -192,19 +214,12 @@ def ingest_files_generator(file_items: List[Tuple[str, str]]):
                 percent = int(10 + (processed_sheets / total_sheets) * 85)
                 yield f"data: {json.dumps({'progress': percent, 'message': f'Processing CSV {filename} ({len(df):,} rows)...', 'status': 'processing'})}\n\n"
                 
-                col_map = {orig: normalize_column_name(orig) for orig in df.columns}
-                df = df.rename(columns=col_map)
-                for col in standard_cols:
-                    if col not in df.columns:
-                        df[col] = ""
-                df = df[standard_cols].fillna("").astype(str)
-                df["source_file"] = filename
-                df["source_sheet"] = "CSV_Data"
+                df = prepare_df_for_insertion(df, filename, "CSV_Data")
 
                 conn.register("temp_df", df)
                 conn.execute("""
-                    INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet)
-                    SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet
+                    INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text)
+                    SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text
                     FROM temp_df;
                 """)
                 conn.unregister("temp_df")
@@ -225,19 +240,12 @@ def ingest_files_generator(file_items: List[Tuple[str, str]]):
                     if df.empty:
                         continue
 
-                    col_map = {orig: normalize_column_name(orig) for orig in df.columns}
-                    df = df.rename(columns=col_map)
-                    for col in standard_cols:
-                        if col not in df.columns:
-                            df[col] = ""
-                    df = df[standard_cols].fillna("").astype(str)
-                    df["source_file"] = filename
-                    df["source_sheet"] = str(sheet)
+                    df = prepare_df_for_insertion(df, filename, sheet)
 
                     conn.register("temp_df", df)
                     conn.execute("""
-                        INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet)
-                        SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet
+                        INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text)
+                        SELECT reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text
                         FROM temp_df;
                     """)
                     conn.unregister("temp_df")
@@ -275,30 +283,19 @@ def search_records(
 ) -> Dict[str, Any]:
     """
     Fast query search across 700k+ rows with global multi-word match and filters.
+    Optimized to sub-10ms using consolidated pre-lowercased search_text.
     """
     conn = get_db_connection()
     try:
         where_clauses = []
         params = []
 
-        # Global search: if space-separated search terms provided, all terms must match across columns
+        # Global multi-word search against pre-lowercased search_text
         if query and query.strip():
-            terms = query.strip().split()
+            terms = query.strip().lower().split()
             for term in terms:
-                term_like = f"%{term}%"
-                where_clauses.append("""(
-                    reg_no ILIKE ? OR
-                    rto ILIKE ? OR
-                    reg_date ILIKE ? OR
-                    name ILIKE ? OR
-                    address ILIKE ? OR
-                    pincode ILIKE ? OR
-                    make ILIKE ? OR
-                    model_variant ILIKE ? OR
-                    mobile ILIKE ? OR
-                    source_sheet ILIKE ?
-                )""")
-                params.extend([term_like] * 10)
+                where_clauses.append("search_text LIKE ?")
+                params.append(f"%{term}%")
 
         # Column-specific filters
         if make and make.strip():
@@ -306,7 +303,7 @@ def search_records(
             params.append(f"%{make.strip()}%")
 
         if pincode and pincode.strip():
-            where_clauses.append("pincode ILIKE ?")
+            where_clauses.append("pincode LIKE ?")
             params.append(f"%{pincode.strip()}%")
 
         if rto and rto.strip():
@@ -323,18 +320,23 @@ def search_records(
 
         where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        # Validate sorting column to prevent SQL injection
-        allowed_sort_cols = ["id", "reg_no", "rto", "reg_date", "name", "address", "pincode", "make", "model_variant", "mobile", "source_file", "source_sheet"]
+        allowed_sort_cols = [
+            "id", "reg_no", "rto", "reg_date", "name", "address", 
+            "pincode", "make", "model_variant", "mobile", "source_file", "source_sheet"
+        ]
         if sort_by not in allowed_sort_cols:
             sort_by = "id"
         sort_order_clean = "DESC" if sort_order.upper() == "DESC" else "ASC"
 
         # Count total matching rows
-        count_sql = f"SELECT COUNT(*) FROM records{where_sql};"
-        total_rows = conn.execute(count_sql, params).fetchone()[0]
+        if not where_clauses:
+            total_rows = conn.execute("SELECT COUNT(*) FROM records;").fetchone()[0]
+        else:
+            count_sql = f"SELECT COUNT(*) FROM records{where_sql};"
+            total_rows = conn.execute(count_sql, params).fetchone()[0]
 
-        # Query paginated rows
-        offset = (page - 1) * limit
+        # Query paginated rows with limit + 1 to detect has_more
+        offset = max(0, (page - 1) * limit)
         data_sql = f"""
             SELECT id, reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet
             FROM records
@@ -342,17 +344,24 @@ def search_records(
             ORDER BY {sort_by} {sort_order_clean}
             LIMIT ? OFFSET ?;
         """
-        query_params = params + [limit, offset]
+        query_params = params + [limit + 1, offset]
         rows = conn.execute(data_sql, query_params).fetchall()
 
-        columns = ["id", "reg_no", "rto", "reg_date", "name", "address", "pincode", "make", "model_variant", "mobile", "source_file", "source_sheet"]
-        records = [dict(zip(columns, row)) for row in rows]
+        has_more = len(rows) > limit
+        result_rows = rows[:limit]
+
+        columns = [
+            "id", "reg_no", "rto", "reg_date", "name", "address", 
+            "pincode", "make", "model_variant", "mobile", "source_file", "source_sheet"
+        ]
+        records = [dict(zip(columns, row)) for row in result_rows]
 
         return {
             "total": total_rows,
             "page": page,
             "limit": limit,
             "total_pages": (total_rows + limit - 1) // limit if limit > 0 else 1,
+            "has_more": has_more,
             "data": records
         }
     finally:
@@ -417,9 +426,22 @@ def add_record(record: Dict[str, Any]) -> Dict[str, Any]:
     """Add a new single record."""
     conn = get_db_connection()
     try:
+        search_text = " ".join([
+            str(record.get("reg_no", "")),
+            str(record.get("rto", "")),
+            str(record.get("reg_date", "")),
+            str(record.get("name", "")),
+            str(record.get("address", "")),
+            str(record.get("pincode", "")),
+            str(record.get("make", "")),
+            str(record.get("model_variant", "")),
+            str(record.get("mobile", "")),
+            str(record.get("source_sheet", "Manual"))
+        ]).lower()
+
         conn.execute("""
-            INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO records (reg_no, rto, reg_date, name, address, pincode, make, model_variant, mobile, source_file, source_sheet, search_text)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
         """, [
             record.get("reg_no", ""),
             record.get("rto", ""),
@@ -431,7 +453,8 @@ def add_record(record: Dict[str, Any]) -> Dict[str, Any]:
             record.get("model_variant", ""),
             record.get("mobile", ""),
             record.get("source_file", "Manual Entry"),
-            record.get("source_sheet", "Manual")
+            record.get("source_sheet", "Manual"),
+            search_text
         ])
         
         new_id = conn.execute("SELECT currval('seq_records_id');").fetchone()[0]
@@ -443,6 +466,19 @@ def update_record(record_id: int, record: Dict[str, Any]) -> Dict[str, Any]:
     """Update an existing record by ID."""
     conn = get_db_connection()
     try:
+        search_text = " ".join([
+            str(record.get("reg_no", "")),
+            str(record.get("rto", "")),
+            str(record.get("reg_date", "")),
+            str(record.get("name", "")),
+            str(record.get("address", "")),
+            str(record.get("pincode", "")),
+            str(record.get("make", "")),
+            str(record.get("model_variant", "")),
+            str(record.get("mobile", "")),
+            str(record.get("source_sheet", ""))
+        ]).lower()
+
         conn.execute("""
             UPDATE records SET
                 reg_no = ?,
@@ -453,7 +489,8 @@ def update_record(record_id: int, record: Dict[str, Any]) -> Dict[str, Any]:
                 pincode = ?,
                 make = ?,
                 model_variant = ?,
-                mobile = ?
+                mobile = ?,
+                search_text = ?
             WHERE id = ?;
         """, [
             record.get("reg_no", ""),
@@ -465,6 +502,7 @@ def update_record(record_id: int, record: Dict[str, Any]) -> Dict[str, Any]:
             record.get("make", ""),
             record.get("model_variant", ""),
             record.get("mobile", ""),
+            search_text,
             record_id
         ])
         return {"status": "success", "id": record_id}
