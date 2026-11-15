@@ -139,8 +139,8 @@
                   <!-- Toggle Active / Revoke Access -->
                   <button
                     v-if="u.id !== user.id"
-                    class="icon-btn"
-                    :class="u.is_active ? 'danger' : 'primary'"
+                    class="action-btn"
+                    :class="u.is_active ? 'btn-revoke' : 'btn-activate'"
                     :title="u.is_active ? 'Revoke user access' : 'Restore user access'"
                     @click="toggleUserActive(u)"
                   >
@@ -149,7 +149,7 @@
 
                   <!-- Reset Password -->
                   <button
-                    class="icon-btn"
+                    class="action-btn btn-neutral"
                     title="Generate new temporary password"
                     @click="handleResetPassword(u)"
                   >
@@ -159,7 +159,7 @@
                   <!-- Delete User -->
                   <button
                     v-if="u.id !== user.id"
-                    class="icon-btn danger"
+                    class="action-btn btn-delete"
                     title="Delete user account"
                     @click="handleDeleteUser(u)"
                   >
@@ -396,52 +396,54 @@
 
     <!-- MODAL: ADD NEW USER -->
     <div v-if="showAddUserModal" class="modal-overlay" @click.self="showAddUserModal = false">
-      <div class="modal-card glass-panel" style="max-width: 440px;">
+      <div class="modal-card">
         <div class="modal-header">
-          <h3>Add New User</h3>
-          <button class="search-clear-btn" @click="showAddUserModal = false">✕</button>
+          <div>
+            <h3>Add New User</h3>
+            <p class="modal-subtitle">Grant access via email. Master password will be assigned automatically.</p>
+          </div>
+          <button class="modal-close-btn" @click="showAddUserModal = false">✕</button>
         </div>
 
-        <div v-if="addUserError" class="auth-error-msg" style="margin: 14px 0 0;">
+        <div v-if="addUserError" class="auth-error-msg" style="margin: 0 0 16px;">
           {{ addUserError }}
         </div>
 
-        <form @submit.prevent="submitAddUser" style="margin-top: 18px;">
-          <div class="auth-form-group">
-            <label>User Email Address</label>
+        <form @submit.prevent="submitAddUser">
+          <div class="modal-field">
+            <label class="modal-label">User Email Address</label>
             <input
               v-model="newUserEmail"
               type="email"
-              class="auth-input"
-              style="padding-left: 14px;"
+              class="modal-input"
               placeholder="e.g. employee@company.com"
               required
             />
           </div>
 
-          <div class="auth-form-group">
-            <label>Initial Password / OTP (Optional)</label>
+          <div class="modal-field">
+            <label class="modal-label">Initial Password / OTP (Optional)</label>
             <input
               v-model="newUserPassword"
               type="text"
-              class="auth-input"
-              style="padding-left: 14px;"
-              placeholder="Leave blank to auto-generate OTP"
+              class="modal-input"
+              placeholder="Leave blank for Master Password (Pass@123456)"
             />
+            <span class="modal-hint">User will be required to set their own permanent password on first login.</span>
           </div>
 
-          <div class="auth-form-group">
-            <label>Access Role</label>
-            <select v-model="newUserRole" class="auth-input" style="padding-left: 14px;">
+          <div class="modal-field">
+            <label class="modal-label">Access Role</label>
+            <select v-model="newUserRole" class="modal-select">
               <option value="user">Standard User (Search Only)</option>
               <option value="admin">Administrator (Full Access)</option>
             </select>
           </div>
 
-          <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px;">
-            <button type="button" class="icon-btn" @click="showAddUserModal = false">Cancel</button>
-            <button type="submit" class="primary-btn" :disabled="addUserLoading">
-              {{ addUserLoading ? 'Creating...' : 'Create User' }}
+          <div class="modal-footer">
+            <button type="button" class="modal-btn-cancel" @click="showAddUserModal = false">Cancel</button>
+            <button type="submit" class="modal-btn-submit" :disabled="addUserLoading">
+              {{ addUserLoading ? 'Creating User...' : 'Create User' }}
             </button>
           </div>
         </form>
@@ -450,25 +452,25 @@
 
     <!-- MODAL: ONE TIME PASSWORD DISPLAY -->
     <div v-if="showOtpModal" class="modal-overlay" @click.self="showOtpModal = false">
-      <div class="modal-card glass-panel" style="max-width: 460px; text-align: center;">
-        <div class="login-logo-circle" style="background: linear-gradient(135deg, #10b981, #059669); margin: 0 auto 12px;">
+      <div class="modal-card" style="text-align: center;">
+        <div class="login-logo-circle" style="background: linear-gradient(135deg, #10b981, #059669); margin: 0 auto 16px;">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
         </div>
-        <h3 style="font-size: 1.25rem;">{{ otpModalTitle }}</h3>
-        <p style="color: var(--text-muted); font-size: 0.88rem; margin-top: 4px;">
-          Share these login details with <strong>{{ otpModalEmail }}</strong>. They will be required to set a permanent password upon first login.
+        <h3 style="font-size: 1.3rem; font-weight: 700; color: #0f172a;">{{ otpModalTitle }}</h3>
+        <p style="color: var(--text-muted); font-size: 0.9rem; margin-top: 6px; line-height: 1.4;">
+          Share these login details with <strong>{{ otpModalEmail }}</strong>. They will be required to change this password on first login.
         </p>
 
         <div class="otp-box">
-          <span style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); font-weight: 600;">One-Time Password (OTP)</span>
+          <span style="font-size: 0.78rem; text-transform: uppercase; color: var(--text-muted); font-weight: 700; letter-spacing: 0.05em;">Temporary / Master Password</span>
           <div class="otp-code">{{ otpModalCode }}</div>
-          <button class="icon-btn" style="margin: 0 auto;" @click="copyOtpCode">
+          <button type="button" class="icon-btn" style="margin: 0 auto;" @click="copyOtpCode">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copy OTP to Clipboard
+            Copy Password to Clipboard
           </button>
         </div>
 
-        <button class="primary-btn" style="width: 100%; margin-top: 10px;" @click="showOtpModal = false">
+        <button class="modal-btn-submit" style="width: 100%; justify-content: center; padding: 12px; margin-top: 14px;" @click="showOtpModal = false">
           Done
         </button>
       </div>
@@ -476,53 +478,56 @@
 
     <!-- MODAL: ADD / EDIT RECORD -->
     <div v-if="showRecordModal" class="modal-overlay" @click.self="showRecordModal = false">
-      <div class="modal-card glass-panel" style="max-width: 560px;">
+      <div class="modal-card" style="max-width: 600px;">
         <div class="modal-header">
-          <h3>{{ editingRecordId ? 'Edit Record' : 'Add New Record' }}</h3>
-          <button class="search-clear-btn" @click="showRecordModal = false">✕</button>
+          <div>
+            <h3>{{ editingRecordId ? 'Edit Vehicle Record' : 'Add New Vehicle Record' }}</h3>
+            <p class="modal-subtitle">Directly update database records</p>
+          </div>
+          <button class="modal-close-btn" @click="showRecordModal = false">✕</button>
         </div>
 
-        <form @submit.prevent="submitRecordForm" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 16px;">
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Registration No</label>
-            <input v-model="recordFormData.reg_no" type="text" class="auth-input" style="padding-left: 10px;" required />
+        <form @submit.prevent="submitRecordForm" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 8px;">
+          <div class="modal-field">
+            <label class="modal-label">Registration No</label>
+            <input v-model="recordFormData.reg_no" type="text" class="modal-input" placeholder="e.g. MH12SM5430" required />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Owner Name</label>
-            <input v-model="recordFormData.name" type="text" class="auth-input" style="padding-left: 10px;" required />
+          <div class="modal-field">
+            <label class="modal-label">Owner Name</label>
+            <input v-model="recordFormData.name" type="text" class="modal-input" placeholder="Full Name" required />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Make / Brand</label>
-            <input v-model="recordFormData.make" type="text" class="auth-input" style="padding-left: 10px;" required />
+          <div class="modal-field">
+            <label class="modal-label">Make / Brand</label>
+            <input v-model="recordFormData.make" type="text" class="modal-input" placeholder="e.g. Maruti, Honda" required />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Model Variant</label>
-            <input v-model="recordFormData.model_variant" type="text" class="auth-input" style="padding-left: 10px;" />
+          <div class="modal-field">
+            <label class="modal-label">Model Variant</label>
+            <input v-model="recordFormData.model_variant" type="text" class="modal-input" placeholder="e.g. Swift VXI, Activa 5G" />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Mobile Number</label>
-            <input v-model="recordFormData.mobile" type="text" class="auth-input" style="padding-left: 10px;" />
+          <div class="modal-field">
+            <label class="modal-label">Mobile Number</label>
+            <input v-model="recordFormData.mobile" type="text" class="modal-input" placeholder="10-digit number" />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Pincode</label>
-            <input v-model="recordFormData.pincode" type="text" class="auth-input" style="padding-left: 10px;" />
+          <div class="modal-field">
+            <label class="modal-label">Pincode</label>
+            <input v-model="recordFormData.pincode" type="text" class="modal-input" placeholder="e.g. 411033" />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>RTO Code</label>
-            <input v-model="recordFormData.rto" type="text" class="auth-input" style="padding-left: 10px;" />
+          <div class="modal-field">
+            <label class="modal-label">RTO Code</label>
+            <input v-model="recordFormData.rto" type="text" class="modal-input" placeholder="e.g. MH12" />
           </div>
-          <div class="auth-form-group" style="margin: 0;">
-            <label>Reg Date</label>
-            <input v-model="recordFormData.reg_date" type="text" class="auth-input" style="padding-left: 10px;" />
+          <div class="modal-field">
+            <label class="modal-label">Reg Date</label>
+            <input v-model="recordFormData.reg_date" type="text" class="modal-input" placeholder="YYYY-MM-DD" />
           </div>
-          <div class="auth-form-group" style="grid-column: span 2; margin: 0;">
-            <label>Address</label>
-            <textarea v-model="recordFormData.address" class="auth-input" style="padding: 10px; height: 60px;"></textarea>
+          <div class="modal-field" style="grid-column: span 2;">
+            <label class="modal-label">Address</label>
+            <textarea v-model="recordFormData.address" class="modal-input" style="height: 64px; resize: vertical;" placeholder="Full street / flat address"></textarea>
           </div>
 
-          <div style="grid-column: span 2; display: flex; justify-content: flex-end; gap: 10px; margin-top: 14px;">
-            <button type="button" class="icon-btn" @click="showRecordModal = false">Cancel</button>
-            <button type="submit" class="primary-btn">Save Record</button>
+          <div style="grid-column: span 2;" class="modal-footer">
+            <button type="button" class="modal-btn-cancel" @click="showRecordModal = false">Cancel</button>
+            <button type="submit" class="modal-btn-submit">Save Record</button>
           </div>
         </form>
       </div>
@@ -530,15 +535,15 @@
 
     <!-- MODAL: CLEAR DB CONFIRMATION -->
     <div v-if="showClearDbModal" class="modal-overlay" @click.self="showClearDbModal = false">
-      <div class="modal-card glass-panel" style="max-width: 420px; text-align: center;">
-        <div style="font-size: 2.4rem; margin-bottom: 8px;">⚠️</div>
-        <h3 style="font-size: 1.2rem; color: #b91c1c;">Clear Entire Database?</h3>
-        <p style="color: var(--text-muted); font-size: 0.88rem; margin: 10px 0 20px;">
+      <div class="modal-card" style="max-width: 440px; text-align: center;">
+        <div style="font-size: 2.8rem; margin-bottom: 8px;">⚠️</div>
+        <h3 style="font-size: 1.25rem; color: #b91c1c; font-weight: 700;">Clear Entire Database?</h3>
+        <p style="color: var(--text-muted); font-size: 0.9rem; margin: 10px 0 20px; line-height: 1.4;">
           This will permanently delete all vehicle records. This action cannot be undone.
         </p>
-        <div style="display: flex; gap: 10px;">
-          <button class="icon-btn" style="flex: 1;" @click="showClearDbModal = false">Cancel</button>
-          <button class="primary-btn" style="flex: 1; background: #dc2626;" @click="confirmClearDatabase">Yes, Clear All</button>
+        <div style="display: flex; gap: 12px;">
+          <button class="modal-btn-cancel" style="flex: 1;" @click="showClearDbModal = false">Cancel</button>
+          <button class="modal-btn-submit" style="flex: 1; background: #dc2626; justify-content: center;" @click="confirmClearDatabase">Yes, Clear All</button>
         </div>
       </div>
     </div>

@@ -129,12 +129,15 @@ def health_check():
 def login_endpoint(req: LoginRequest):
     auth_res = authenticate_user(req.email, req.password)
     if not auth_res:
+        print(f"[AUTH] Login failed for email: {req.email}")
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     
     if auth_res.get("error") == "revoked":
+        print(f"[AUTH] Login blocked (account revoked) for email: {req.email}")
         raise HTTPException(status_code=403, detail="Account access has been revoked. Contact administrator.")
     
     token = create_session(auth_res["id"])
+    print(f"[AUTH] Login successful for email: {req.email} (role: {auth_res.get('role')})")
     return {
         "status": "success",
         "token": token,
@@ -240,6 +243,33 @@ def search_endpoint(
     if current_user.get("must_change_password"):
         raise HTTPException(status_code=403, detail="You must change your one-time password before accessing search data.")
 
+    is_admin = (current_user.get("role") == "admin")
+
+    # For standard users: STRICT VEHICLE REGISTRATION NUMBER SEARCH ONLY!
+    # Prevents data scraping or bulk leaks (e.g. typing "khara" to dump all Kharadi records)
+    if not is_admin:
+        if not query or not query.strip():
+            return {
+                "total": 0,
+                "page": 1,
+                "limit": limit,
+                "total_pages": 0,
+                "has_more": False,
+                "latency_ms": 0,
+                "search_strategy": "empty_prompt",
+                "data": []
+            }
+
+        return search_records(
+            query=query.strip(),
+            strict_reg_no=True,
+            page=page,
+            limit=limit,
+            sort_by=sort_by,
+            sort_order=sort_order
+        )
+
+    # Admin Portal search (supports filters and multi-column browsing)
     return search_records(
         query=query,
         make=make,
@@ -247,6 +277,7 @@ def search_endpoint(
         rto=rto,
         source_sheet=source_sheet,
         source_file=source_file,
+        strict_reg_no=False,
         page=page,
         limit=limit,
         sort_by=sort_by,

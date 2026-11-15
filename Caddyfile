@@ -1,15 +1,16 @@
-# Configuration for Caddy Reverse Proxy with Automatic SSL (HTTPS)
-# Replace 'your-email@example.com' with your actual email (used for Let's Encrypt certificates expiration notifications)
-# Replace 'yourdomain.com' and 'www.yourdomain.com' with your actual domain names
-
 {
-    email manager-email@example.com
+    email {$SSL_EMAIL:dayamapratik43@gmail.com}
 }
 
-ventoriocapital.com {
-    # Reverse proxy all requests to the FastAPI application container on port 8000
-    reverse_proxy app:8000
-    
-    # Enable compression for faster response times
+{$DOMAIN_NAME:vehicle.sanketagrawal.com} {
+    # Reverse proxy all requests to FastAPI app container
+    reverse_proxy app:8000 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Gzip and Zstandard compression
     encode gzip zstd
 }

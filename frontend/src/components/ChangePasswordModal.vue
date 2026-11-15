@@ -1,63 +1,58 @@
 <template>
   <div class="modal-overlay" @click.self="$emit('close')">
-    <div class="modal-card glass-panel" style="max-width: 440px;">
+    <div class="modal-card">
       <div class="modal-header">
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <div class="login-logo-circle" style="width: 36px; height: 36px;">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          </div>
+        <div>
           <h3>Change Password</h3>
+          <p class="modal-subtitle">Set your permanent account password</p>
         </div>
-        <button class="search-clear-btn" @click="$emit('close')">✕</button>
+        <button class="modal-close-btn" @click="$emit('close')">✕</button>
       </div>
 
-      <div v-if="errorMsg" class="auth-error-msg" style="margin: 16px 0 0;">
+      <div v-if="errorMsg" class="auth-error-msg" style="margin: 0 0 16px;">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
         <span>{{ errorMsg }}</span>
       </div>
 
-      <form @submit.prevent="handleSubmit" style="margin-top: 18px;">
-        <div class="auth-form-group">
-          <label>Current Password</label>
+      <form @submit.prevent="handleSubmit">
+        <div class="modal-field">
+          <label class="modal-label">Current Password</label>
           <input
             v-model="oldPassword"
             type="password"
-            class="auth-input"
-            style="padding-left: 14px;"
+            class="modal-input"
             placeholder="Enter current password"
             required
           />
         </div>
 
-        <div class="auth-form-group">
-          <label>New Password</label>
+        <div class="modal-field">
+          <label class="modal-label">New Password</label>
           <input
             v-model="newPassword"
             type="password"
-            class="auth-input"
-            style="padding-left: 14px;"
+            class="modal-input"
             placeholder="At least 6 characters"
             minlength="6"
             required
           />
         </div>
 
-        <div class="auth-form-group">
-          <label>Confirm New Password</label>
+        <div class="modal-field">
+          <label class="modal-label">Confirm New Password</label>
           <input
             v-model="confirmPassword"
             type="password"
-            class="auth-input"
-            style="padding-left: 14px;"
+            class="modal-input"
             placeholder="Re-enter new password"
             minlength="6"
             required
           />
         </div>
 
-        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px;">
-          <button type="button" class="icon-btn" @click="$emit('close')">Cancel</button>
-          <button type="submit" class="primary-btn" :disabled="loading">
+        <div class="modal-footer">
+          <button type="button" class="modal-btn-cancel" @click="$emit('close')">Cancel</button>
+          <button type="submit" class="modal-btn-submit" :disabled="loading">
             <span v-if="!loading">Update Password</span>
             <span v-else>Updating...</span>
           </button>

@@ -1,16 +1,41 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: large-data-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: ${POSTGRES_USER:-appuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pg_secure_pass_2026}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: large-data-crud-app
+    container_name: large-data-app
+    restart: unless-stopped
     ports:
       - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       - ./data:/app/data
     environment:
-      - ADMIN_EMAIL=admin@example.com
-      - ADMIN_PASSWORD=admin123
-    restart: unless-stopped
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-appuser}:${POSTGRES_PASSWORD:-pg_secure_pass_2026}@postgres:5432/auth_db
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-dayamapratik43@gmail.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-AdminPass2026!}
+      - DEFAULT_MASTER_PASSWORD=${DEFAULT_MASTER_PASSWORD:-Pass@123456}
+      - DUCKDB_PATH=/app/data/records.duckdb
+
+volumes:
+  postgres_data:
